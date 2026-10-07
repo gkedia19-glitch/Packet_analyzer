@@ -1,4 +1,130 @@
-# DPI Engine - Deep Packet Inspection System
+# DPI Engine: Multi-threaded Deep Packet Inspection in C++17
+
+A deep packet inspection engine that reads network captures (`.pcap`), identifies which application each connection belongs to, applies blocking rules, and writes the filtered traffic to a new `.pcap` with a full report.
+
+**Highlights**
+
+- **Application detection from encrypted traffic:** extracts the domain name (SNI) from the TLS Client Hello and classifies 17 apps, including YouTube, Netflix, Instagram, WhatsApp, Zoom and GitHub.
+- **Multi-threaded pipeline:** load-balancer threads hash each connection to fast-path worker threads, so every packet of a flow is handled by the same worker and each worker keeps its own private flow table.
+- **Flow-aware blocking:** block by app, domain or source IP. Packets are tracked by 5-tuple, so once a connection is identified as blocked, all of its packets are dropped.
+- **No dependencies:** standard C++17 and pthreads only. Builds with `g++` or CMake.
+
+![DPI engine report](docs/demo.png)
+
+## Quick Start
+
+**Requirements:** a C++17 compiler (`g++` 9+ or `clang++`). On Windows, use [WSL](https://learn.microsoft.com/windows/wsl/install) (Ubuntu) and run `sudo apt install g++ cmake`.
+
+### Build with CMake
+
+```bash
+git clone https://github.com/gkedia19-glitch/Packet_analyzer.git
+cd Packet_analyzer
+cmake -S . -B build
+cmake --build build
+```
+
+This produces two programs in `build/`:
+
+| Program | Description |
+|---|---|
+| `dpi_engine` | Multi-threaded engine (main program) |
+| `dpi_simple` | Single-threaded version, easier to read and learn from |
+
+### Or build with g++ directly
+
+```bash
+g++ -std=c++17 -pthread -O2 -I include -o dpi_engine \
+    src/dpi_mt.cpp src/pcap_reader.cpp src/packet_parser.cpp \
+    src/sni_extractor.cpp src/types.cpp
+```
+
+### Run it
+
+A sample capture (`test_dpi.pcap`) is included:
+
+```bash
+./build/dpi_engine test_dpi.pcap output.pcap
+```
+
+Block apps, domains or IPs:
+
+```bash
+./build/dpi_engine test_dpi.pcap output.pcap \
+    --block-app YouTube \
+    --block-app TikTok \
+    --block-domain facebook \
+    --block-ip 192.168.1.50
+```
+
+Tune the thread count (load balancers × fast-path workers per balancer):
+
+```bash
+./build/dpi_engine input.pcap output.pcap --lbs 4 --fps 4   # 16 worker threads
+```
+
+| Option | Meaning |
+|---|---|
+| `--block-app <name>` | Drop all traffic classified as this app (repeatable) |
+| `--block-domain <text>` | Drop connections whose SNI contains this text (repeatable) |
+| `--block-ip <address>` | Drop all traffic from this source IP (repeatable) |
+| `--lbs <n>` | Number of load-balancer threads (default 2) |
+| `--fps <n>` | Fast-path workers per load balancer (default 2) |
+
+To capture your own traffic, record it in Wireshark and save as **`.pcap`** (not `.pcapng`). To regenerate the sample file, run `python3 generate_test_pcap.py`.
+
+## Example Output
+
+Running with `--block-app YouTube --block-domain facebook` on the sample capture:
+
+```
+Total Packets:                77
+Forwarded:                    75
+Dropped:                       2
+
+APPLICATION BREAKDOWN
+HTTPS                39  50.6%
+Unknown              16  20.8%
+DNS                   4   5.2%
+YouTube               1   1.3%
+Facebook              1   1.3%
+Netflix               1   1.3%
+...
+
+[Detected Domains/SNIs]
+  - www.youtube.com   -> YouTube
+  - www.facebook.com  -> Facebook
+  - www.netflix.com   -> Netflix
+  - github.com        -> GitHub
+```
+
+## How It Works
+
+```
+ input.pcap → Reader → Load Balancers → Fast-Path Workers → Output Writer → output.pcap
+                         (hash 5-tuple)   (parse, track flow,    (forwarded
+                                           extract SNI,           packets only)
+                                           apply rules)
+```
+
+1. **Reader** parses the PCAP file and pushes raw packets into the pipeline.
+2. **Load balancers** hash each packet's 5-tuple (source IP, destination IP, source port, destination port, protocol) and route it to a worker, so a whole connection always lands on the same thread.
+3. **Fast-path workers** parse Ethernet, IP and TCP/UDP headers, track the connection, extract the SNI from the TLS handshake, classify the application and check the blocking rules.
+4. **Output** writes every forwarded packet to the new PCAP and prints the report.
+
+The detailed walkthrough, from networking basics to each component, is below.
+
+## Limitations
+
+- Works on saved captures (offline); it does not sniff live network traffic.
+- Classification relies on plaintext SNI, so traffic without a visible SNI (for example, with Encrypted Client Hello) shows as `HTTPS` or `Unknown`.
+- Input must be classic `.pcap` format.
+
+## Windows
+
+See [WINDOWS_SETUP.md](WINDOWS_SETUP.md). WSL with the commands above is the simplest route.
+
+---
 
 
 This document explains **everything** about this project - from basic networking concepts to the complete code architecture. After reading this, you should understand exactly how packets flow through the system without needing to read the code.
